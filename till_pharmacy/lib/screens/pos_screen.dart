@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../models/product.dart';
+import '../services/supabase_service.dart';
+
+import 'sales_screen.dart';
+
 class PosScreen extends StatefulWidget {
   const PosScreen({super.key});
 
@@ -9,42 +14,546 @@ class PosScreen extends StatefulWidget {
 }
 
 class _PosScreenState extends State<PosScreen> {
+  final SupabaseService supabaseService = SupabaseService();
+  final List<Product> cart = [];
+  final TextEditingController searchController = TextEditingController();
 
-  String barcode = "No barcode scanned";
+  List<Map<String, dynamic>> suggestions = [];
+
+  double getTotal() {
+    return cart.fold<double>(0, (sum, item) => sum + (item.price * item.qty));
+  }
+
+  void clearCart() {
+    setState(() {
+      cart.clear();
+      suggestions = [];
+      searchController.clear();
+    });
+  }
+
+  void addToCart({
+    required String barcode,
+    required String name,
+    required String unit,
+    required double price,
+    required double minPrice,
+  }) {
+    final index = cart.indexWhere(
+      (p) => p.barcode == barcode && p.unit == unit,
+    );
+
+    setState(() {
+      if (index != -1) {
+        cart[index].qty++;
+      } else {
+        cart.add(
+          Product(
+            barcode: barcode,
+            name: name,
+            unit: unit,
+            price: price,
+            minPrice: minPrice,
+          ),
+        );
+      }
+    });
+  }
+
+  Future<void> editItemPrice(Product product) async {
+    final controller = TextEditingController(text: product.price.toString());
+
+    await showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text("Edit Price - ${product.name} (${product.unit})"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text("Minimum allowed: ${product.minPrice} ₪"),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: "Sale price",
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text("Cancel"),
+            ),
+            TextButton(
+              onPressed: () {
+                final newPrice = double.tryParse(controller.text.trim());
+                if (newPrice == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Invalid price")),
+                  );
+                  return;
+                }
+
+                if (newPrice < product.minPrice) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        "Cannot sell below minimum price (${product.minPrice} ₪)",
+                      ),
+                    ),
+                  );
+                  return;
+                }
+
+                setState(() {
+                  product.price = newPrice;
+                });
+
+                Navigator.of(dialogContext).pop();
+              },
+              child: const Text("Save"),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  List<_UnitOption> buildUnitOptions(Map<String, dynamic> med) {
+    final barcode = (med['barcode'] ?? '').toString();
+    final name = (med['name'] ?? '').toString();
+    final minPrice = ((med['min_price'] ?? 0) as num).toDouble();
+
+    final salePrice = ((med['sale_price'] ?? 0) as num).toDouble();
+    final boxPrice = ((med['box_price'] ?? med['sale_price'] ?? 0) as num).toDouble();
+    final stripPrice = ((med['strip_price'] ?? 0) as num).toDouble();
+    final pillPrice = ((med['pill_price'] ?? 0) as num).toDouble();
+
+    final stockBox = ((med['stock_box'] ?? 0) as num).toInt();
+    final stockStrip = ((med['stock_strip'] ?? 0) as num).toInt();
+    final stockPill = ((med['stock_pill'] ?? 0) as num).toInt();
+
+    final options = <_UnitOption>[];
+
+    if (stockBox > 0) {
+      options.add(
+        _UnitOption(
+          barcode: barcode,
+          name: name,
+          unit: "BOX",
+          price: boxPrice == 0 ? salePrice : boxPrice,
+          minPrice: minPrice,
+        ),
+      );
+    }
+
+    if (stockStrip > 0) {
+      options.add(
+        _UnitOption(
+          barcode: barcode,
+          name: name,
+          unit: "STRIP",
+          price: stripPrice,
+          minPrice: minPrice,
+        ),
+      );
+    }
+
+    if (stockPill > 0) {
+      options.add(
+        _UnitOption(
+          barcode: barcode,
+          name: name,
+          unit: "PILL",
+          price: pillPrice,
+          minPrice: minPrice,
+        ),
+      );
+    }
+
+    // fallback آمن إذا الدواء ليس له stock_* مضبوط لكن له sale_price
+    if (options.isEmpty && salePrice > 0) {
+      options.add(
+        _UnitOption(
+          barcode: barcode,
+          name: name,
+          unit: "BOX",
+          price: salePrice,
+          minPrice: minPrice,
+        ),
+      );
+    }
+
+    return options;
+  }
+
+  Future<void> chooseUnitAndAdd(Map<String, dynamic> med) async {
+    final options = buildUnitOptions(med);
+
+    if (options.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("No sellable unit found for this medicine")),
+      );
+      return;
+    }
+
+    if (options.length == 1) {
+      final o = options.first;
+      addToCart(
+        barcode: o.barcode,
+        name: o.name,
+        unit: o.unit,
+        price: o.price,
+        minPrice: o.minPrice,
+      );
+      return;
+    }
+
+    await showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text((med['name'] ?? '').toString()),
+          content: const Text("Select type"),
+          actions: options
+              .map(
+                (o) => TextButton(
+                  onPressed: () {
+                    addToCart(
+                      barcode: o.barcode,
+                      name: o.name,
+                      unit: o.unit,
+                      price: o.price,
+                      minPrice: o.minPrice,
+                    );
+                    Navigator.of(dialogContext).pop();
+                  },
+                  child: Text("${o.unit} (${o.price} ₪)"),
+                ),
+              )
+              .toList(),
+        );
+      },
+    );
+  }
+
+  Future<void> addProductByBarcode(String barcode) async {
+    final med = await supabaseService.getMedicine(barcode);
+
+    if (!mounted) return;
+
+    if (med == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Medicine not found")),
+      );
+      return;
+    }
+
+    await chooseUnitAndAdd(med);
+  }
+
+  Future<void> addProductFromSearch(Map<String, dynamic> med) async {
+    await chooseUnitAndAdd(med);
+  }
+
+  Future<void> scanBarcode() async {
+    final result = await Navigator.push<String?>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const BarcodeScannerScreen(),
+      ),
+    );
+
+    if (result == null || result.trim().isEmpty) return;
+
+    await addProductByBarcode(result.trim());
+  }
+
+  Future<void> completeSale() async {
+    if (cart.isEmpty) return;
+
+    await supabaseService.saveSale(cart);
+
+    if (!mounted) return;
+
+    clearCart();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("Sale saved")),
+    );
+  }
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Till Pharmacy POS'),
-      ),
-      body: Column(
-        children: [
+        title: const Text("Till Pharmacy POS"),
+        actions: [
 
-          const SizedBox(height:20),
+          IconButton(
+            icon: const Icon(Icons.history),
+            onPressed: () {
 
-          Text(
-            barcode,
-            style: const TextStyle(fontSize:20),
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => SalesScreen(),
+                ),
+              );
+
+            },
           ),
 
-          const SizedBox(height:20),
-
-          Expanded(
-            child: MobileScanner(
-              onDetect: (barcodeCapture) {
-                final List<Barcode> barcodes = barcodeCapture.barcodes;
-                for (final code in barcodes) {
-                  setState(() {
-                    barcode = code.rawValue ?? "Unknown";
-                  });
-                }
-              },
-            ),
+          IconButton(
+            icon: const Icon(Icons.delete),
+            onPressed: clearCart,
           ),
 
         ],
       ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: scanBarcode,
+        child: const Icon(Icons.qr_code_scanner),
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              children: [
+                TextField(
+                  controller: searchController,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    labelText: "Search medicine",
+                    prefixIcon: Icon(Icons.search),
+                  ),
+                  onChanged: (text) async {
+                    if (text.trim().isEmpty) {
+                      setState(() {
+                        suggestions = [];
+                      });
+                      return;
+                    }
+
+                    final result = await supabaseService.searchMedicines(text);
+
+                    if (!mounted) return;
+
+                    setState(() {
+                      suggestions = result;
+                    });
+                  },
+                  onSubmitted: (value) async {
+                    if (suggestions.isEmpty) return;
+
+                    final med = suggestions.first;
+
+                    setState(() {
+                      suggestions = [];
+                      searchController.clear();
+                    });
+
+                    await addProductFromSearch(med);
+                  },
+                ),
+                if (suggestions.isNotEmpty)
+                  Container(
+                    height: 200,
+                    margin: const EdgeInsets.only(top: 8),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.black12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: ListView.builder(
+                      itemCount: suggestions.length,
+                      itemBuilder: (context, index) {
+                        final med = suggestions[index];
+
+                        final displayPrice =
+                            ((med['box_price'] ?? med['sale_price'] ?? 0) as num)
+                                .toDouble();
+
+                        return ListTile(
+                          title: Text((med['name'] ?? '').toString()),
+                          subtitle: Text("$displayPrice ₪"),
+                          onTap: () async {
+                            setState(() {
+                              suggestions = [];
+                              searchController.clear();
+                            });
+
+                            await addProductFromSearch(med);
+                          },
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: cart.length,
+              itemBuilder: (context, index) {
+                final product = cart[index];
+
+                return ListTile(
+                  title: Text("${product.name} (${product.unit})"),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text("Min price: ${product.minPrice} ₪"),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.remove),
+                            onPressed: () {
+                              setState(() {
+                                if (product.qty > 1) {
+                                  product.qty--;
+                                }
+                              });
+                            },
+                          ),
+                          Text(product.qty.toString()),
+                          IconButton(
+                            icon: const Icon(Icons.add),
+                            onPressed: () {
+                              setState(() {
+                                product.qty++;
+                              });
+                            },
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  trailing: SizedBox(
+                    width: 150,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        InkWell(
+                          onTap: () => editItemPrice(product),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text("${product.price} ₪"),
+                              const Text(
+                                "Edit",
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete),
+                          onPressed: () {
+                            setState(() {
+                              cart.removeAt(index);
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.all(16),
+            color: Colors.green[100],
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      "TOTAL (${cart.length} items)",
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      "${getTotal()} ₪",
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: completeSale,
+                    child: const Text("COMPLETE SALE"),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
+}
+
+class BarcodeScannerScreen extends StatelessWidget {
+  const BarcodeScannerScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Scan Barcode"),
+      ),
+      body: MobileScanner(
+        onDetect: (BarcodeCapture capture) {
+          final List<Barcode> barcodes = capture.barcodes;
+
+          if (barcodes.isEmpty) return;
+
+          final String? code = barcodes.first.rawValue;
+
+          if (code == null || code.trim().isEmpty) return;
+
+          Navigator.pop(context, code.trim());
+        },
+      ),
+    );
+  }
+}
+
+class _UnitOption {
+  final String barcode;
+  final String name;
+  final String unit;
+  final double price;
+  final double minPrice;
+
+  _UnitOption({
+    required this.barcode,
+    required this.name,
+    required this.unit,
+    required this.price,
+    required this.minPrice,
+  });
 }
