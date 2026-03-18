@@ -3,7 +3,6 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../models/product.dart';
 import '../services/supabase_service.dart';
-
 import 'sales_screen.dart';
 
 class PosScreen extends StatefulWidget {
@@ -17,6 +16,7 @@ class _PosScreenState extends State<PosScreen> {
   final SupabaseService supabaseService = SupabaseService();
   final List<Product> cart = [];
   final TextEditingController searchController = TextEditingController();
+  final TextEditingController customerNameController = TextEditingController();
 
   List<Map<String, dynamic>> suggestions = [];
 
@@ -24,11 +24,16 @@ class _PosScreenState extends State<PosScreen> {
     return cart.fold<double>(0, (sum, item) => sum + (item.price * item.qty));
   }
 
+  double getLineTotal(Product product) {
+    return product.price * product.qty;
+  }
+
   void clearCart() {
     setState(() {
       cart.clear();
       suggestions = [];
       searchController.clear();
+      customerNameController.clear();
     });
   }
 
@@ -61,7 +66,9 @@ class _PosScreenState extends State<PosScreen> {
   }
 
   Future<void> editItemPrice(Product product) async {
-    final controller = TextEditingController(text: product.price.toString());
+    final controller = TextEditingController(
+      text: product.price.toStringAsFixed(2),
+    );
 
     await showDialog(
       context: context,
@@ -71,7 +78,7 @@ class _PosScreenState extends State<PosScreen> {
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text("Minimum allowed: ${product.minPrice} ₪"),
+              Text("Minimum allowed: ${product.minPrice.toStringAsFixed(2)} ₪"),
               const SizedBox(height: 12),
               TextField(
                 controller: controller,
@@ -91,6 +98,7 @@ class _PosScreenState extends State<PosScreen> {
             TextButton(
               onPressed: () {
                 final newPrice = double.tryParse(controller.text.trim());
+
                 if (newPrice == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text("Invalid price")),
@@ -102,7 +110,7 @@ class _PosScreenState extends State<PosScreen> {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
                       content: Text(
-                        "Cannot sell below minimum price (${product.minPrice} ₪)",
+                        "Cannot sell below minimum price (${product.minPrice.toStringAsFixed(2)} ₪)",
                       ),
                     ),
                   );
@@ -129,7 +137,8 @@ class _PosScreenState extends State<PosScreen> {
     final minPrice = ((med['min_price'] ?? 0) as num).toDouble();
 
     final salePrice = ((med['sale_price'] ?? 0) as num).toDouble();
-    final boxPrice = ((med['box_price'] ?? med['sale_price'] ?? 0) as num).toDouble();
+    final boxPrice =
+        ((med['box_price'] ?? med['sale_price'] ?? 0) as num).toDouble();
     final stripPrice = ((med['strip_price'] ?? 0) as num).toDouble();
     final pillPrice = ((med['pill_price'] ?? 0) as num).toDouble();
 
@@ -175,7 +184,6 @@ class _PosScreenState extends State<PosScreen> {
       );
     }
 
-    // fallback آمن إذا الدواء ليس له stock_* مضبوط لكن له sale_price
     if (options.isEmpty && salePrice > 0) {
       options.add(
         _UnitOption(
@@ -233,7 +241,7 @@ class _PosScreenState extends State<PosScreen> {
                     );
                     Navigator.of(dialogContext).pop();
                   },
-                  child: Text("${o.unit} (${o.price} ₪)"),
+                  child: Text("${o.unit} (${o.price.toStringAsFixed(2)} ₪)"),
                 ),
               )
               .toList(),
@@ -277,7 +285,10 @@ class _PosScreenState extends State<PosScreen> {
   Future<void> completeSale() async {
     if (cart.isEmpty) return;
 
-    await supabaseService.saveSale(cart);
+    await supabaseService.saveSale(
+      cart,
+      customerName: customerNameController.text.trim(),
+    );
 
     if (!mounted) return;
 
@@ -291,7 +302,84 @@ class _PosScreenState extends State<PosScreen> {
   @override
   void dispose() {
     searchController.dispose();
+    customerNameController.dispose();
     super.dispose();
+  }
+
+  Widget _buildCartItem(Product product, int index) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              "${product.name} (${product.unit})",
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                Text("Price: ${product.price.toStringAsFixed(2)} ₪"),
+                Text("Min: ${product.minPrice.toStringAsFixed(2)} ₪"),
+                Text("Qty: ${product.qty}"),
+                Text(
+                  "Line total: ${getLineTotal(product).toStringAsFixed(2)} ₪",
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      if (product.qty > 1) {
+                        product.qty--;
+                      }
+                    });
+                  },
+                  icon: const Icon(Icons.remove),
+                  label: const Text("Less"),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      product.qty++;
+                    });
+                  },
+                  icon: const Icon(Icons.add),
+                  label: const Text("More"),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: () => editItemPrice(product),
+                  icon: const Icon(Icons.edit),
+                  label: const Text("Edit Price"),
+                ),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.delete),
+                  onPressed: () {
+                    setState(() {
+                      cart.removeAt(index);
+                    });
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -300,31 +388,33 @@ class _PosScreenState extends State<PosScreen> {
       appBar: AppBar(
         title: const Text("Till Pharmacy POS"),
         actions: [
-
+          IconButton(
+            icon: const Icon(Icons.qr_code_scanner),
+            onPressed: scanBarcode,
+          ),
           IconButton(
             icon: const Icon(Icons.history),
             onPressed: () {
-
               Navigator.push(
                 context,
                 MaterialPageRoute(
                   builder: (_) => SalesScreen(),
                 ),
               );
-
             },
           ),
-
           IconButton(
             icon: const Icon(Icons.delete),
             onPressed: clearCart,
           ),
 
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: () async {
+              await supabaseService.signOut();
+            },
+          ),
         ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: scanBarcode,
-        child: const Icon(Icons.qr_code_scanner),
       ),
       body: Column(
         children: [
@@ -332,6 +422,15 @@ class _PosScreenState extends State<PosScreen> {
             padding: const EdgeInsets.all(10),
             child: Column(
               children: [
+                TextField(
+                  controller: customerNameController,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    labelText: "Customer name",
+                    prefixIcon: Icon(Icons.person),
+                  ),
+                ),
+                const SizedBox(height: 8),
                 TextField(
                   controller: searchController,
                   decoration: const InputDecoration(
@@ -380,14 +479,13 @@ class _PosScreenState extends State<PosScreen> {
                       itemCount: suggestions.length,
                       itemBuilder: (context, index) {
                         final med = suggestions[index];
-
                         final displayPrice =
                             ((med['box_price'] ?? med['sale_price'] ?? 0) as num)
                                 .toDouble();
 
                         return ListTile(
                           title: Text((med['name'] ?? '').toString()),
-                          subtitle: Text("$displayPrice ₪"),
+                          subtitle: Text("${displayPrice.toStringAsFixed(2)} ₪"),
                           onTap: () async {
                             setState(() {
                               suggestions = [];
@@ -404,113 +502,65 @@ class _PosScreenState extends State<PosScreen> {
             ),
           ),
           Expanded(
-            child: ListView.builder(
-              itemCount: cart.length,
-              itemBuilder: (context, index) {
-                final product = cart[index];
-
-                return ListTile(
-                  title: Text("${product.name} (${product.unit})"),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text("Min price: ${product.minPrice} ₪"),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.remove),
-                            onPressed: () {
-                              setState(() {
-                                if (product.qty > 1) {
-                                  product.qty--;
-                                }
-                              });
-                            },
-                          ),
-                          Text(product.qty.toString()),
-                          IconButton(
-                            icon: const Icon(Icons.add),
-                            onPressed: () {
-                              setState(() {
-                                product.qty++;
-                              });
-                            },
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                  trailing: SizedBox(
-                    width: 150,
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        InkWell(
-                          onTap: () => editItemPrice(product),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            crossAxisAlignment: CrossAxisAlignment.end,
-                            children: [
-                              Text("${product.price} ₪"),
-                              const Text(
-                                "Edit",
-                                style: TextStyle(fontSize: 12),
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.delete),
-                          onPressed: () {
-                            setState(() {
-                              cart.removeAt(index);
-                            });
-                          },
-                        ),
-                      ],
+            child: cart.isEmpty
+                ? const Center(
+                    child: Text(
+                      "No items in cart",
+                      style: TextStyle(fontSize: 16),
                     ),
+                  )
+                : ListView.builder(
+                    itemCount: cart.length,
+                    itemBuilder: (context, index) {
+                      final product = cart[index];
+                      return _buildCartItem(product, index);
+                    },
                   ),
-                );
-              },
-            ),
-          ),
-          Container(
-            padding: const EdgeInsets.all(16),
-            color: Colors.green[100],
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      "TOTAL (${cart.length} items)",
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    Text(
-                      "${getTotal()} ₪",
-                      style: const TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: completeSale,
-                    child: const Text("COMPLETE SALE"),
-                  ),
-                ),
-              ],
-            ),
           ),
         ],
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+          decoration: BoxDecoration(
+            color: Colors.green.shade100,
+            border: const Border(
+              top: BorderSide(color: Colors.black12),
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'TOTAL (${cart.length} items)',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Text(
+                    '${getTotal().toStringAsFixed(2)} ₪',
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: cart.isEmpty ? null : completeSale,
+                  child: const Text('COMPLETE SALE'),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -4,6 +4,16 @@ import '../models/product.dart';
 class SupabaseService {
   final supabase = Supabase.instance.client;
 
+  Future<Map<String, dynamic>?> getSaleById(String saleId) async {
+    final response = await supabase
+        .from('sales')
+        .select()
+        .eq('id', saleId)
+        .maybeSingle();
+
+    return response;
+  }
+
   Future<Map<String, dynamic>?> getMedicine(String barcode) async {
     final data = await supabase
         .from('medicines')
@@ -26,7 +36,59 @@ class SupabaseService {
     return List<Map<String, dynamic>>.from(response);
   }
 
-  Future<void> saveSale(List<Product> cart) async {
+  Future<String?> _findOrCreateCustomer(String? customerName) async {
+    final cleanedName = customerName?.trim();
+
+    if (cleanedName == null || cleanedName.isEmpty) {
+      return null;
+    }
+
+    final existing = await supabase
+        .from('customers')
+        .select('id, name')
+        .ilike('name', cleanedName)
+        .maybeSingle();
+
+    if (existing != null) {
+      return existing['id'] as String;
+    }
+
+    final inserted = await supabase
+        .from('customers')
+        .insert({
+          'name': cleanedName,
+        })
+        .select('id')
+        .single();
+
+    return inserted['id'] as String;
+  }
+
+
+  Future<void> signIn({
+    required String email,
+    required String password,
+  }) async {
+    await supabase.auth.signInWithPassword(
+      email: email,
+      password: password,
+    );
+  }
+
+  Future<void> signOut() async {
+    await supabase.auth.signOut();
+  }
+
+  User? getCurrentUser() {
+    return supabase.auth.currentUser;
+  }
+
+  Stream<AuthState> get authStateChanges => supabase.auth.onAuthStateChange;
+
+  Future<void> saveSale(
+    List<Product> cart, {
+    String? customerName,
+  }) async {
     final user = supabase.auth.currentUser;
 
     final total = cart.fold<double>(
@@ -34,12 +96,18 @@ class SupabaseService {
       (sum, item) => sum + (item.price * item.qty),
     );
 
+    final cleanedName = customerName?.trim();
+    final customerId = await _findOrCreateCustomer(cleanedName);
+
     final sale = await supabase
         .from('sales')
         .insert({
           'total': total,
           'payment_type': 'cash',
           'user_id': user?.id,
+          'customer_id': customerId,
+          'customer_name':
+              (cleanedName == null || cleanedName.isEmpty) ? null : cleanedName,
         })
         .select()
         .single();
@@ -60,9 +128,7 @@ class SupabaseService {
     }
   }
 
-
   Future<List<Map<String, dynamic>>> getSales() async {
-
     final response = await supabase
         .from('sales')
         .select()
@@ -70,17 +136,14 @@ class SupabaseService {
         .limit(50);
 
     return List<Map<String, dynamic>>.from(response);
-
   }
 
   Future<List<Map<String, dynamic>>> getSaleItems(String saleId) async {
-
     final response = await supabase
         .from('sale_items')
         .select()
         .eq('sale_id', saleId);
 
     return List<Map<String, dynamic>>.from(response);
-
   }
 }
