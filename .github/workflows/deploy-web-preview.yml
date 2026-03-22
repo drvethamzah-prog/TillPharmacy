@@ -3,7 +3,7 @@ name: Deploy Web Preview
 on:
   push:
     branches:
-      - codex/deploy-web-preview
+      - main
     paths:
       - .github/workflows/deploy-web-preview.yml
       - till_pharmacy/**
